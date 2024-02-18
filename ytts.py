@@ -1,53 +1,16 @@
-import subprocess
 import requests
 import wave
 import sys
 import os
-import pkg_resources
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import numpy as np
 from deepspeech import Model
+from tqdm import tqdm
 from pytube import YouTube
+from pytube.exceptions import PytubeError
 from pydub import AudioSegment
+from setup import install_requirements
 
-
-def check_requirements_installed(requirements_path):
-    """Check whether requirements.txt package is already installed"""
-    with open(requirements_path, 'r') as f:
-        requirements = [line.strip() for line in f if line.strip()]
-
-    installed_packages = {pkg.key for pkg in pkg_resources.working_set}
-    
-    missing_packages = []
-    for requirement in requirements:
-        package_name = requirement.split('==')[0].split('>')[0].split('<')[0]
-        if package_name not in installed_packages:
-            missing_packages.append(requirement)
-
-    return missing_packages
-
-def check_ffmpeg_installed():
-    """Check if ffmpeg and ffprobe are installed and in PATH -- https://ffmpeg.org/"""
-    try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        subprocess.run(["ffprobe", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        print("ffmpeg and ffprobe are installed and available in PATH.")
-        return True
-    except:
-        print("ffmpeg or ffprobe is not installed or not available in PATH.")
-        sys.exit(1)
-
-def install_requirements():
-    """Install the contents of requirements.txt"""
-    requirements_path = os.path.join(os.path.dirname(__file__), 'requirements.txt')
-    if os.path.exists(requirements_path):
-        missing_packages = check_requirements_installed(requirements_path)
-        if missing_packages:
-            print(f"Installing missing packages: {', '.join(missing_packages)}")
-            subprocess.check_call([os.sys.executable, '-m', 'pip', 'install', *missing_packages])
-        else:
-            print("All packages from requirements.txt are already installed.")
-    else:
-        print("Error: requirements.txt file not found in the same directory as the script.")
 
 def download_model():
     """Download the model used to create the transcription"""
@@ -63,13 +26,17 @@ def download_model():
             model_url = sys.argv[model_index + 1]
     else:
         model_url = default_model
-        model_filename = os.path.basename(default_model)
     
+    model_filename = os.path.basename(model_url)
+    model_path = os.path.join(model_directory, model_filename)
+
+    scorer_url = model_url.replace('.pbmm', '.scorer')
+    scorer_filename = model_filename.replace('.pbmm', '.scorer')
+    scorer_path = os.path.join(model_directory, scorer_filename)
+
     files_to_download = [
-        {"url": model_url, 
-         "path": os.path.join(model_directory, os.path.basename(model_url))},
-        {"url": model_url.replace('.pbmm', '.scorer'), 
-         "path": os.path.join(model_directory, os.path.basename(model_url.replace('.pbmm', '.scorer')))}
+        {"url": model_url, "path": model_path},
+        {"url": scorer_url, "path": scorer_path}
     ]
 
     for file in files_to_download:
@@ -85,16 +52,29 @@ def download_model():
             print(f"Downloaded to {file['path']}")
     return model_filename
 
-def download_audio(youtube_url, source_path):
+def download_audio(source_path, youtube_url):
     """Download the audio from video and convert to mono"""
-    yt = YouTube(youtube_url)
-    audio_stream = yt.streams.get_audio_only()
-    filename = audio_stream.default_filename
-    print(f"Downloaded '{filename}'")
-    file_path = os.path.join(source_path, filename)
-    audio_stream.download(output_path=source_path)
+    try:
+        yt = YouTube(youtube_url)
+        audio_stream = yt.streams.get_audio_only()
+        if not audio_stream:
+            raise Exception("No audio stream found")
 
-    # Convert to mono
+        filename = audio_stream.default_filename
+        print(f"Downloading '{filename}'...")
+        audio_stream.download(output_path=source_path)
+        print(f"Downloaded '{filename}' to '{source_path}'")
+        return filename
+    except PytubeError as e:
+        print(f"Error: Failed to download audio from '{youtube_url}'. {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def convert_to_mono(source_path, filename):
+    file_path = os.path.join(source_path, filename)
     audio = AudioSegment.from_file(file_path)
     mono_audio = audio.set_channels(1)
     mono_filename = 'mono_' + filename.replace('.mp4', '.wav')
@@ -104,7 +84,7 @@ def download_audio(youtube_url, source_path):
     print(f"Converted '{filename}' to mono, creating '{mono_filename}")
     os.remove(file_path)
     print(f"Deleted '{filename}'")
-    return mono_filename  # Return the path to the mono file
+    return mono_filename
 
 def transcribe_audio(model_filename, scorer_filename, audio_path, output_path):
     model_path = os.path.join('./models', model_filename)
@@ -118,7 +98,13 @@ def transcribe_audio(model_filename, scorer_filename, audio_path, output_path):
         buffer = wf.readframes(frames)
         audio = np.frombuffer(buffer, dtype=np.int16)
 
-    transcription = model.stt(audio)
+    # Split the audio into chunks and transcribe each chunk
+    chunk_size = 8192  # You can adjust the chunk size
+    chunks = [audio[i:i + chunk_size] for i in range(0, len(audio), chunk_size)]
+    transcription = ""
+
+    for chunk in tqdm(chunks, desc="Transcribing", unit="chunk"):
+        transcription += model.stt(chunk)
 
     with open(output_path, 'w') as f:
         f.write(transcription)
@@ -140,38 +126,41 @@ def transcribe_folder(model_filename, folder_path, output_folder):
             print(f"Transcription saved to {output_path}")
 
 
-if __name__ == "__main__":
+def get_argument_value(argument, default=None):
+    """Retrieve the value of a command-line argument."""
+    try:
+        index = sys.argv.index(argument)
+        return sys.argv[index + 1]
+    except (ValueError, IndexError):
+        return default
+
+def main():
     if "--audio" not in sys.argv:
-        print("Usage: ytts.py [--skip-reqs] --audio <YouTube-URL> [--path <Download-Path>]")
+        print("Usage: ytts.py [--skip-reqs] --audio <YouTube-URL> --person <> [--path <Download-Subfolder-Path>]")
         sys.exit(1)
 
     if "--skip-reqs" not in sys.argv:
         install_requirements()
 
-    check_ffmpeg_installed()
+    youtube_url = get_argument_value("--audio")
+    person_name = get_argument_value("--person", "default")
+    source_path = get_argument_value("--path", f"./{person_name}-mono/") + os.sep
+    output_folder = f"./{person_name}-transcripts/"
 
-    person_index = sys.argv.index("--person")
-    audio_index = sys.argv.index("--audio")
-
-    if audio_index + 1 < len(sys.argv):
-        youtube_url = sys.argv[audio_index + 1]
-        person_name = sys.argv[person_index + 1]
-        source_path = f"./{person_name}-mono/"
-        output_folder = f"./{person_name}-transcripts/"
-        if "--path" in sys.argv:
-            path_index = sys.argv.index("--path")
-            if path_index + 1 < len(sys.argv):
-                source_path = sys.argv[path_index + 1]
-                if not source_path.endswith(os.sep):
-                    print(f"Creating ./{source_path}")
-                    source_path += os.sep
-        model_filename = download_model()
-        download_audio(youtube_url, source_path)
-        transcribe_folder(model_filename, source_path, output_folder)
-    else:
+    if not youtube_url:
         print("Error: No YouTube URL provided after --audio")
         sys.exit(1)
+
+    print(f"Creating {source_path}")
+    model_filename = download_model()
+    audio_filename = download_audio(source_path, youtube_url)
+    convert_to_mono(source_path, audio_filename)
+    transcribe_folder(model_filename, source_path, output_folder)
+
+if __name__ == "__main__":
+    main()
 
 # Align audio and text
 # mfa align /path/to/audio /path/to/transcriptions /path/to/dictionary /path/to/output
 
+# https://dev.to/azure/ai-using-whisper-to-convert-audio-to-text-from-my-podcast-episode-in-spanish-c96

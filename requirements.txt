@@ -6,3 +6,4 @@ deepspeech
 wave
 numpy
 requests
+tqdm

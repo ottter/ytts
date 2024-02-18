@@ -1,5 +1,7 @@
+models/*
+!models/README.md
 /*-mono
 /*-transcripts
-/models
 *.wav
 *.mp4
+TODO
