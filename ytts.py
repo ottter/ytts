@@ -64,19 +64,25 @@ def download_model():
     else:
         model_url = default_model
         model_filename = os.path.basename(default_model)
+    
+    files_to_download = [
+        {"url": model_url, 
+         "path": os.path.join(model_directory, os.path.basename(model_url))},
+        {"url": model_url.replace('.pbmm', '.scorer'), 
+         "path": os.path.join(model_directory, os.path.basename(model_url.replace('.pbmm', '.scorer')))}
+    ]
 
-    model_path = os.path.join(model_directory, model_filename)
-    if os.path.exists(model_path):
-        print(f"Model file already exists at {model_path}. Skipping download.")
-        return model_filename
-
-    print(f"Downloading model from {model_url}...")
-    response = requests.get(model_url, stream=True)
-    with open(model_path, 'wb') as model_file:
-        for chunk in response.iter_content(chunk_size=1024):
-            if chunk:
-                model_file.write(chunk)
-    print(f"Model downloaded to {model_path}")
+    for file in files_to_download:
+        if os.path.exists(file["path"]):
+            print(f"File already exists at {file['path']}. Skipping download.")
+        else:
+            print(f"Downloading from {file['url']}...")
+            response = requests.get(file["url"], stream=True)
+            with open(file["path"], 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+            print(f"Downloaded to {file['path']}")
     return model_filename
 
 def download_audio(youtube_url, source_path):
@@ -84,6 +90,7 @@ def download_audio(youtube_url, source_path):
     yt = YouTube(youtube_url)
     audio_stream = yt.streams.get_audio_only()
     filename = audio_stream.default_filename
+    print(f"Downloaded '{filename}'")
     file_path = os.path.join(source_path, filename)
     audio_stream.download(output_path=source_path)
 
@@ -94,8 +101,9 @@ def download_audio(youtube_url, source_path):
     mono_file_path = os.path.join(source_path, mono_filename)
     mono_audio.export(mono_file_path, format="wav")
 
-    print(f"Downloaded and converted to mono: {mono_filename}")
+    print(f"Converted '{filename}' to mono, creating '{mono_filename}")
     os.remove(file_path)
+    print(f"Deleted '{filename}'")
     return mono_filename  # Return the path to the mono file
 
 def transcribe_audio(model_filename, scorer_filename, audio_path, output_path):
@@ -119,6 +127,10 @@ def transcribe_audio(model_filename, scorer_filename, audio_path, output_path):
 
 def transcribe_folder(model_filename, folder_path, output_folder):
     scorer_filename = model_filename.replace('.pbmm', '.scorer')
+
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
     for filename in os.listdir(folder_path):
         if filename.endswith('.wav'):
             audio_path = os.path.join(folder_path, filename)
@@ -145,7 +157,7 @@ if __name__ == "__main__":
         youtube_url = sys.argv[audio_index + 1]
         person_name = sys.argv[person_index + 1]
         source_path = f"./{person_name}-mono/"
-        output_folder = f"./{person_name}-transcipts"
+        output_folder = f"./{person_name}-transcripts/"
         if "--path" in sys.argv:
             path_index = sys.argv.index("--path")
             if path_index + 1 < len(sys.argv):
@@ -162,5 +174,4 @@ if __name__ == "__main__":
 
 # Align audio and text
 # mfa align /path/to/audio /path/to/transcriptions /path/to/dictionary /path/to/output
-
 
