@@ -1,7 +1,14 @@
 import subprocess
+import requests
+import wave
 import sys
 import os
 import pkg_resources
+import numpy as np
+from deepspeech import Model
+from pytube import YouTube
+from pydub import AudioSegment
+
 
 def check_requirements_installed(requirements_path):
     """Check whether requirements.txt package is already installed"""
@@ -18,6 +25,17 @@ def check_requirements_installed(requirements_path):
 
     return missing_packages
 
+def check_ffmpeg_installed():
+    """Check if ffmpeg and ffprobe are installed and in PATH -- https://ffmpeg.org/"""
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(["ffprobe", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        print("ffmpeg and ffprobe are installed and available in PATH.")
+        return True
+    except:
+        print("ffmpeg or ffprobe is not installed or not available in PATH.")
+        sys.exit(1)
+
 def install_requirements():
     """Install the contents of requirements.txt"""
     requirements_path = os.path.join(os.path.dirname(__file__), 'requirements.txt')
@@ -31,33 +49,84 @@ def install_requirements():
     else:
         print("Error: requirements.txt file not found in the same directory as the script.")
 
-def download_audio(youtube_url, output_path):
-    output_template = output_path + "%(title)s.%(ext)s"
-    command = [
-        "youtube-dl",
-        "--extract-audio",
-        "--audio-format", "wav",
-        "-o", output_template,
-        youtube_url
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode == 0:
-        lines = result.stdout.splitlines()
-        downloaded_file = ""
-        for line in lines:
-            if "[ffmpeg] Destination:" in line:
-                downloaded_file = line.split(": ")[1]
-                break
+def download_model():
+    """Download the model used to create the transcription"""
+    model_directory = "./models"
+    if not os.path.exists(model_directory):
+        os.makedirs(model_directory)
+    
+    default_model = "https://github.com/mozilla/DeepSpeech/releases/download/v0.9.3/deepspeech-0.9.3-models.pbmm"
 
-        if downloaded_file:
-            mono_file = downloaded_file.replace(".wav", "_mono.wav")
-            ffmpeg_command = ["ffmpeg", "-i", downloaded_file, "-ac", "1", mono_file]
-            subprocess.run(ffmpeg_command)
-            print(f"Converted to mono: {mono_file}")
-        else:
-            print("Error: Could not determine downloaded file name.")
+    if "--model" in sys.argv:
+        model_index = sys.argv.index("--model")
+        if model_index + 1 < len(sys.argv):
+            model_url = sys.argv[model_index + 1]
     else:
-        print("Error: youtube-dl command failed.")
+        model_url = default_model
+        model_filename = os.path.basename(default_model)
+
+    model_path = os.path.join(model_directory, model_filename)
+    if os.path.exists(model_path):
+        print(f"Model file already exists at {model_path}. Skipping download.")
+        return model_filename
+
+    print(f"Downloading model from {model_url}...")
+    response = requests.get(model_url, stream=True)
+    with open(model_path, 'wb') as model_file:
+        for chunk in response.iter_content(chunk_size=1024):
+            if chunk:
+                model_file.write(chunk)
+    print(f"Model downloaded to {model_path}")
+    return model_filename
+
+def download_audio(youtube_url, source_path):
+    """Download the audio from video and convert to mono"""
+    yt = YouTube(youtube_url)
+    audio_stream = yt.streams.get_audio_only()
+    filename = audio_stream.default_filename
+    file_path = os.path.join(source_path, filename)
+    audio_stream.download(output_path=source_path)
+
+    # Convert to mono
+    audio = AudioSegment.from_file(file_path)
+    mono_audio = audio.set_channels(1)
+    mono_filename = 'mono_' + filename.replace('.mp4', '.wav')
+    mono_file_path = os.path.join(source_path, mono_filename)
+    mono_audio.export(mono_file_path, format="wav")
+
+    print(f"Downloaded and converted to mono: {mono_filename}")
+    os.remove(file_path)
+    return mono_filename  # Return the path to the mono file
+
+def transcribe_audio(model_filename, scorer_filename, audio_path, output_path):
+    model_path = os.path.join('./models', model_filename)
+    scorer_path = os.path.join('./models', scorer_filename)
+
+    model = Model(model_path)
+    model.enableExternalScorer(scorer_path)
+
+    with wave.open(audio_path, 'rb') as wf:
+        frames = wf.getnframes()
+        buffer = wf.readframes(frames)
+        audio = np.frombuffer(buffer, dtype=np.int16)
+
+    transcription = model.stt(audio)
+
+    with open(output_path, 'w') as f:
+        f.write(transcription)
+
+    return transcription
+
+def transcribe_folder(model_filename, folder_path, output_folder):
+    scorer_filename = model_filename.replace('.pbmm', '.scorer')
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.wav'):
+            audio_path = os.path.join(folder_path, filename)
+            output_path = os.path.join(output_folder, filename.replace('.wav', '.txt'))
+            print(f"Transcribing {audio_path}...")
+            transcribe_audio(model_filename, scorer_filename, audio_path, output_path)
+            print(f"Transcription saved to {output_path}")
+
 
 if __name__ == "__main__":
     if "--audio" not in sys.argv:
@@ -67,27 +136,29 @@ if __name__ == "__main__":
     if "--skip-reqs" not in sys.argv:
         install_requirements()
 
+    check_ffmpeg_installed()
+
+    person_index = sys.argv.index("--person")
     audio_index = sys.argv.index("--audio")
+
     if audio_index + 1 < len(sys.argv):
         youtube_url = sys.argv[audio_index + 1]
-        output_path = ""
+        person_name = sys.argv[person_index + 1]
+        source_path = f"./{person_name}-mono/"
+        output_folder = f"./{person_name}-transcipts"
         if "--path" in sys.argv:
             path_index = sys.argv.index("--path")
             if path_index + 1 < len(sys.argv):
-                output_path = sys.argv[path_index + 1]
-                if not output_path.endswith(os.sep):
-                    output_path += os.sep
-        download_audio(youtube_url, output_path)
+                source_path = sys.argv[path_index + 1]
+                if not source_path.endswith(os.sep):
+                    print(f"Creating ./{source_path}")
+                    source_path += os.sep
+        model_filename = download_model()
+        download_audio(youtube_url, source_path)
+        transcribe_folder(model_filename, source_path, output_folder)
     else:
         print("Error: No YouTube URL provided after --audio")
         sys.exit(1)
-
-
-# Convert the audio to mono
-# ffmpeg -i input.wav -ac 1 output_mono.wav
-
-# Automatic speech recognition
-# deepspeech --model deepspeech-0.9.3-models.pbmm --scorer deepspeech-0.9.3-models.scorer --audio output_mono.wav > transcription.txt
 
 # Align audio and text
 # mfa align /path/to/audio /path/to/transcriptions /path/to/dictionary /path/to/output

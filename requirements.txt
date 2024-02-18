@@ -1,2 +1,8 @@
-youtube-dl
+pytube
+pydub
+ffmpeg
+ffprobe
 deepspeech
+wave
+numpy
+requests
