@@ -1,56 +1,20 @@
-import requests
-import wave
+from setup import install_requirements
+
 import sys
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
-import numpy as np
-from deepspeech import Model
+import time
+import shutil
+import whisper
+import warnings
 from tqdm import tqdm
 from pytube import YouTube
 from pytube.exceptions import PytubeError
 from pydub import AudioSegment
-from setup import install_requirements
+from pydub.silence import split_on_silence
 
 
-def download_model():
-    """Download the model used to create the transcription"""
-    model_directory = "./models"
-    if not os.path.exists(model_directory):
-        os.makedirs(model_directory)
-    
-    default_model = "https://github.com/mozilla/DeepSpeech/releases/download/v0.9.3/deepspeech-0.9.3-models.pbmm"
+warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead", module="whisper")
 
-    if "--model" in sys.argv:
-        model_index = sys.argv.index("--model")
-        if model_index + 1 < len(sys.argv):
-            model_url = sys.argv[model_index + 1]
-    else:
-        model_url = default_model
-    
-    model_filename = os.path.basename(model_url)
-    model_path = os.path.join(model_directory, model_filename)
-
-    scorer_url = model_url.replace('.pbmm', '.scorer')
-    scorer_filename = model_filename.replace('.pbmm', '.scorer')
-    scorer_path = os.path.join(model_directory, scorer_filename)
-
-    files_to_download = [
-        {"url": model_url, "path": model_path},
-        {"url": scorer_url, "path": scorer_path}
-    ]
-
-    for file in files_to_download:
-        if os.path.exists(file["path"]):
-            print(f"File already exists at {file['path']}. Skipping download.")
-        else:
-            print(f"Downloading from {file['url']}...")
-            response = requests.get(file["url"], stream=True)
-            with open(file["path"], 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
-            print(f"Downloaded to {file['path']}")
-    return model_filename
 
 def download_audio(source_path, youtube_url):
     """Download the audio from video and convert to mono"""
@@ -60,11 +24,16 @@ def download_audio(source_path, youtube_url):
         if not audio_stream:
             raise Exception("No audio stream found")
 
-        filename = audio_stream.default_filename
-        print(f"Downloading '{filename}'...")
+        # Check if the corresponding .wav file already exists
+        wav_filename = "mono_" + os.path.splitext(audio_stream.default_filename)[0] + ".wav"
+        if os.path.exists(os.path.join(source_path, wav_filename)):
+            print(f"Skipping download, '{wav_filename}' already exists.")
+            return wav_filename
+
+        print(f"Downloading '{audio_stream.default_filename}' from {youtube_url}...")
         audio_stream.download(output_path=source_path)
-        print(f"Downloaded '{filename}' to '{source_path}'")
-        return filename
+        print(f"Downloaded '{audio_stream.default_filename}' to '{source_path}'")
+        return audio_stream.default_filename
     except PytubeError as e:
         print(f"Error: Failed to download audio from '{youtube_url}'. {e}")
         sys.exit(1)
@@ -86,44 +55,80 @@ def convert_to_mono(source_path, filename):
     print(f"Deleted '{filename}'")
     return mono_filename
 
-def transcribe_audio(model_filename, scorer_filename, audio_path, output_path):
-    model_path = os.path.join('./models', model_filename)
-    scorer_path = os.path.join('./models', scorer_filename)
+def transcribe_audio(audio_path, output_folder, model_name="base", silence_thresh=-40, min_silence_len=700, keep_silence=500):
+    start_time = time.time()
 
-    model = Model(model_path)
-    model.enableExternalScorer(scorer_path)
+    # Load the Whisper model
+    model = whisper.load_model(model_name)
 
-    with wave.open(audio_path, 'rb') as wf:
-        frames = wf.getnframes()
-        buffer = wf.readframes(frames)
-        audio = np.frombuffer(buffer, dtype=np.int16)
+    # Load the audio file using pydub
+    audio = AudioSegment.from_file(audio_path)
 
-    # Split the audio into chunks and transcribe each chunk
-    chunk_size = 8192  # You can adjust the chunk size
-    chunks = [audio[i:i + chunk_size] for i in range(0, len(audio), chunk_size)]
+    # Split the audio into chunks based on silence
+    audio_chunks = split_on_silence(
+        audio,
+        silence_thresh=silence_thresh,      # Adjust this value based on your audio file
+        min_silence_len=min_silence_len,    # The minimum length of silence in ms
+        keep_silence=keep_silence           # The amount of silence to leave at the beginning and end of each chunk in ms
+    )
+
     transcription = ""
+    count = len(audio_chunks)
 
-    for chunk in tqdm(chunks, desc="Transcribing", unit="chunk"):
-        transcription += model.stt(chunk)
+    x = 50  # The threshold for the total number of chunks
+    y = 2  # The number of chunks to process at the beginning and end if there are more than x chunks
 
-    with open(output_path, 'w') as f:
-        f.write(transcription)
+    for i, chunk in enumerate(tqdm(audio_chunks, desc="Transcribing", unit="chunk")):
+        if len(audio_chunks) <= x or (i < y or i >= len(audio_chunks) - y):
+            base_filename = os.path.splitext(os.path.basename(audio_path))[0]
+            out_wav = os.path.join(output_folder, f"{i+1:03d}_{base_filename}.wav")
+            out_txt = os.path.join(output_folder, f"{i+1:03d}_{base_filename}.txt")
+
+            print(f"\r\nExporting >> {out_wav} - {i+1}/{count}")
+            chunk.export(out_wav, format="wav")
+
+            try:
+                result = model.transcribe(out_wav)
+                transcript_chunk = result["text"]
+                print(transcript_chunk)
+
+                # Append transcript in memory if you have sufficient memory
+                transcription += " " + transcript_chunk
+
+                with open(out_txt, 'w') as f:
+                    f.write(transcript_chunk)
+            except UnicodeEncodeError:
+                print(f"Skipping transcription of {out_wav} due to UnicodeEncodeError")
+                os.remove(out_wav)  # Delete the chunk and continue
+                continue
+    
+    print(f"Transcript:\n{transcription}\n")
+
+    # print the elapsed time
+    print(f"Elapsed time: {int(time.time() - start_time)} seconds")
 
     return transcription
 
-def transcribe_folder(model_filename, folder_path, output_folder):
-    scorer_filename = model_filename.replace('.pbmm', '.scorer')
-
+def transcribe_folder(mono_folder, output_folder, model_name="base"):
+    # Ensure output folder exists
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    for filename in os.listdir(folder_path):
-        if filename.endswith('.wav'):
-            audio_path = os.path.join(folder_path, filename)
-            output_path = os.path.join(output_folder, filename.replace('.wav', '.txt'))
-            print(f"Transcribing {audio_path}...")
-            transcribe_audio(model_filename, scorer_filename, audio_path, output_path)
-            print(f"Transcription saved to {output_path}")
+    # Iterate through each file in the folder
+    for file in os.listdir(mono_folder):
+        if file.endswith(".wav"):
+            # Construct the paths for the audio file and its corresponding transcription file
+            audio_path = os.path.join(mono_folder, file)
+            transcription_file = os.path.splitext(file)[0] + ".txt"
+            output_path = os.path.join(output_folder, transcription_file)
+
+            # Check if the transcription file already exists
+            if not os.path.exists(output_path):
+                print(f"Transcribing {audio_path}...")
+                # Transcribe the audio file
+                transcribe_audio(audio_path, output_folder, model_name=model_name)
+            else:
+                print(f"Skipping {audio_path}, transcription already exists.")
 
 
 def get_argument_value(argument, default=None):
@@ -135,27 +140,57 @@ def get_argument_value(argument, default=None):
         return default
 
 def main():
-    if "--audio" not in sys.argv:
-        print("Usage: ytts.py [--skip-reqs] --audio <YouTube-URL> --person <> [--path <Download-Subfolder-Path>]")
+    if len(sys.argv) < 3:
+        print("Usage: ytts.py transcribe <YouTube-URL> --person <Person-Name> [--path <Download-Subfolder-Path>]")
         sys.exit(1)
 
-    if "--skip-reqs" not in sys.argv:
-        install_requirements()
+    command = sys.argv[1]
+    commands = {
+        "transcribe": transcribe_command,
+        "clear": clear_command,
+        "delete": clear_command,
+        "update": update_command,
+        "tts": tts_command
+    }
 
-    youtube_url = get_argument_value("--audio")
+    if command in commands:
+        commands[command]()
+    else:
+        print(f"Unknown command: {command}")
+        sys.exit(1)
+
+def transcribe_command():
+    youtube_url = sys.argv[2]
     person_name = get_argument_value("--person", "default")
-    source_path = get_argument_value("--path", f"./{person_name}-mono/") + os.sep
+    mono_folder = get_argument_value("--path", f"./{person_name}-mono/") + os.sep
     output_folder = f"./{person_name}-transcripts/"
 
-    if not youtube_url:
-        print("Error: No YouTube URL provided after --audio")
+    audio_filename = download_audio(mono_folder, youtube_url)
+    convert_to_mono(mono_folder, audio_filename)
+    transcribe_folder(mono_folder, output_folder, model_name="base")
+
+def clear_command():
+    person_name = sys.argv[2]
+    if not person_name:
+        print("Error: No person name provided after 'clear' command")
         sys.exit(1)
 
-    print(f"Creating {source_path}")
-    model_filename = download_model()
-    audio_filename = download_audio(source_path, youtube_url)
-    convert_to_mono(source_path, audio_filename)
-    transcribe_folder(model_filename, source_path, output_folder)
+    mono_folder = f"./{person_name}-mono/"
+    output_folder = f"./{person_name}-transcripts/"
+    if os.path.exists(mono_folder):
+        print(f"Deleting {mono_folder}...")
+        shutil.rmtree(mono_folder)
+        print(f"Deleting {output_folder}...")
+        shutil.rmtree(output_folder)
+    else:
+        print(f"Folder {mono_folder} does not exist.")
+
+def update_command():
+    install_requirements()
+
+def tts_command():
+    print("not yet...")
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

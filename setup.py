@@ -33,8 +33,6 @@ def install_requirements():
     """Install the contents of requirements.txt"""
     requirements_path = os.path.join(os.path.dirname(__file__), 'requirements.txt')
 
-    check_ffmpeg_installed()
-
     if os.path.exists(requirements_path):
         missing_packages = check_requirements_installed(requirements_path)
         if missing_packages:
