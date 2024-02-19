@@ -1,5 +1,4 @@
 models/*
-!models/README.md
 /*-mono
 /*-transcripts
 *.wav
