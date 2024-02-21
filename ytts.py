@@ -1,16 +1,15 @@
+from pydub.silence import split_on_silence
+from pytube.exceptions import PytubeError
 from setup import install_requirements
-
+from pydub import AudioSegment
+from pytube import YouTube
+from tqdm import tqdm
+import warnings
+import whisper
+import shutil
+import time
 import sys
 import os
-import time
-import shutil
-import whisper
-import warnings
-from tqdm import tqdm
-from pytube import YouTube
-from pytube.exceptions import PytubeError
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
 
 
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead", module="whisper")
@@ -140,26 +139,26 @@ def get_argument_value(argument, default=None):
         return default
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: ytts.py transcribe <YouTube-URL> --person <Person-Name> [--path <Download-Subfolder-Path>]")
-        sys.exit(1)
-
     command = sys.argv[1]
     commands = {
-        "transcribe": transcribe_command,
-        "clear": clear_command,
-        "delete": clear_command,
-        "update": update_command,
-        "tts": tts_command
+        "transcribe": command_transcribe,
+        "clear": command_clear,
+        "delete": command_clear,
+        "update": command_update,
+        "tts": command_tts,
+        "help": command_help
     }
 
     if command in commands:
         commands[command]()
-    else:
+    elif command not in commands:
         print(f"Unknown command: {command}")
         sys.exit(1)
+    else:
+        print("Usage: ytts.py transcribe <YouTube-URL> --person <Person-Name> [--path <Download-Subfolder-Path>]")
+        sys.exit(1)
 
-def transcribe_command():
+def command_transcribe():
     youtube_url = sys.argv[2]
     person_name = get_argument_value("--person", "default")
     mono_folder = get_argument_value("--path", f"./{person_name}-mono/") + os.sep
@@ -169,28 +168,66 @@ def transcribe_command():
     convert_to_mono(mono_folder, audio_filename)
     transcribe_folder(mono_folder, output_folder, model_name="base")
 
-def clear_command():
-    person_name = sys.argv[2]
-    if not person_name:
-        print("Error: No person name provided after 'clear' command")
+
+def command_clear():
+    if len(sys.argv) < 3:
+        print("Usage: ytts.py clear --person <person_name> | --name <person_name> | --audio")
         sys.exit(1)
 
-    mono_folder = f"./{person_name}-mono/"
-    output_folder = f"./{person_name}-transcripts/"
-    if os.path.exists(mono_folder):
-        print(f"Deleting {mono_folder}...")
-        shutil.rmtree(mono_folder)
-        print(f"Deleting {output_folder}...")
-        shutil.rmtree(output_folder)
-    else:
-        print(f"Folder {mono_folder} does not exist.")
+    option = sys.argv[2]
 
-def update_command():
+    if option in ('--person', '--name') and len(sys.argv) >= 4:
+        person_name = sys.argv[3]
+        mono_folder = f"./{person_name}-mono/"
+        output_folder = f"./{person_name}-transcripts/"
+        if os.path.exists(mono_folder):
+            print(f"Deleting {mono_folder}...")
+            shutil.rmtree(mono_folder)
+        if os.path.exists(output_folder):
+            print(f"Deleting {output_folder}...")
+            shutil.rmtree(output_folder)
+    elif option == '--audio':
+        print("Clearing audio files...")
+    else:
+        print(f"ytts.py: invalid option -- '{option[2:]}'")
+        print("Usage: ytts.py clear --person <person_name> | --name <person_name> | --audio")
+        sys.exit(1)
+
+def command_update():
     install_requirements()
 
-def tts_command():
+def command_tts():
     print("not yet...")
     sys.exit(0)
+
+def command_help():
+    commands = {
+        "clear": {
+            "usage": "ytts.py clear --person <person_name> | --name <person_name> | --audio",
+            "description": "Deletes all the specified person's content, or specific transcriptions."
+        },
+        "transcribe": {
+            "usage": "ytts.py transcribe <audio_file> [--person <person_name>]",
+            "description": "Transcribes the given audio file. Optionally, specify the person's name for personalized transcription."
+        },
+        "update": {
+            "usage": "ytts.py update",
+            "description": "Update"
+        },
+        "tts": {
+            "usage": "ytts.py tts",
+            "description": "Converts the given text to speech."
+        }
+    }
+
+    print("ytts.py command usage:\n")
+    for command, info in commands.items():
+        print(f"{command.capitalize()}:")
+        print(f"   - Usage: {info['usage']}")
+        print(f"   - Description: {info['description']}\n")
+
+    # print("For more information on a specific command, use 'ytts.py <command> --help'.")
+
 
 if __name__ == "__main__":
     main()
