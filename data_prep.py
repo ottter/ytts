@@ -1,26 +1,26 @@
-
+"""Data Preparation"""
+import os
+import sys
+import time
+import whisper
 from pydub.silence import split_on_silence
 from pytube.exceptions import PytubeError
 from pydub import AudioSegment
 from pytube import YouTube
 from tqdm import tqdm
-import whisper
-import time
-import sys
-import os
 
 def data_prep(mono_folder, person_name, youtube_url):
+    """Main data prep function"""
     transcript_output = f"./{person_name}-transcripts/"
     audio_filename = download_audio(mono_folder, youtube_url)
     convert_to_mono(mono_folder, audio_filename)
     transcribe_folder(mono_folder, transcript_output, model_name="base")
-    return
 
 def download_audio(source_path, youtube_url):
     """Download the audio from video and convert to mono"""
     try:
-        yt = YouTube(youtube_url)
-        audio_stream = yt.streams.get_audio_only()
+        vid = YouTube(youtube_url)
+        audio_stream = vid.streams.get_audio_only()
         if not audio_stream:
             raise Exception("No audio stream found")
 
@@ -34,15 +34,16 @@ def download_audio(source_path, youtube_url):
         audio_stream.download(output_path=source_path)
         print(f"Downloaded '{audio_stream.default_filename}' to '{source_path}'")
         return audio_stream.default_filename
-    except PytubeError as e:
-        print(f"Error: Failed to download audio from '{youtube_url}'. {e}")
+    except PytubeError as error:
+        print(f"Error: Failed to download audio from '{youtube_url}'. {error}")
         sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}")
+    except Exception as error:
+        print(f"Error: {error}")
         sys.exit(1)
 
 
 def convert_to_mono(source_path, filename):
+    """Convert audio files into mono/single channel"""
     file_path = os.path.join(source_path, filename)
     audio = AudioSegment.from_file(file_path)
     mono_audio = audio.set_channels(1)
@@ -55,13 +56,14 @@ def convert_to_mono(source_path, filename):
     print(f"Deleted '{filename}'")
     return mono_filename
 
-def transcribe_audio(audio_path, output_folder, model_name="base", silence_thresh=-40, min_silence_len=700, keep_silence=500):
+def transcribe_audio(audio_path, output_folder, model_name="base"):
+    """Transcribe the audio clips into a text file"""
+    silence_thresh=-40
+    min_silence_len=700
+    keep_silence=500
+
     start_time = time.time()
-
-    # Load the Whisper model
     model = whisper.load_model(model_name)
-
-    # Load the audio file using pydub
     audio = AudioSegment.from_file(audio_path)
 
     # Split the audio into chunks based on silence
@@ -69,7 +71,7 @@ def transcribe_audio(audio_path, output_folder, model_name="base", silence_thres
         audio,
         silence_thresh=silence_thresh,      # Adjust this value based on your audio file
         min_silence_len=min_silence_len,    # The minimum length of silence in ms
-        keep_silence=keep_silence           # The amount of silence to leave at the beginning and end of each chunk in ms
+        keep_silence=keep_silence           # The amount of silence to leave at the start/end of each chunk
     )
 
     transcription = ""
@@ -101,7 +103,7 @@ def transcribe_audio(audio_path, output_folder, model_name="base", silence_thres
                 print(f"Skipping transcription of {out_wav} due to UnicodeEncodeError")
                 os.remove(out_wav)  # Delete the chunk and continue
                 continue
-    
+
     print(f"Transcript:\n{transcription}\n")
 
     # print the elapsed time
@@ -110,6 +112,7 @@ def transcribe_audio(audio_path, output_folder, model_name="base", silence_thres
     return transcription
 
 def transcribe_folder(mono_folder, output_folder, model_name="base"):
+    """Support for multiple transcriptions of one person"""
     # Ensure output folder exists
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
