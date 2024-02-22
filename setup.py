@@ -1,3 +1,4 @@
+"""Setup"""
 import os
 import sys
 import subprocess
@@ -5,11 +6,11 @@ import pkg_resources
 
 def check_requirements_installed(requirements_path):
     """Check whether requirements.txt package is already installed"""
-    with open(requirements_path, 'r') as f:
-        requirements = [line.strip() for line in f if line.strip()]
+    with open(requirements_path, 'r', encoding="utf-8") as file:
+        requirements = [line.strip() for line in file if line.strip()]
 
     installed_packages = {pkg.key for pkg in pkg_resources.working_set}
-    
+
     missing_packages = []
     for requirement in requirements:
         package_name = requirement.split('==')[0].split('>')[0].split('<')[0]
